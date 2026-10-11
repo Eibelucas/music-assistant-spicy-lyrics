@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+dist/
+build/
+.env
+.env.*
+*.pem
+id_ed25519*
+id_rsa*
+installation-private.json
+INSTALLATION.json
+*originaldateien*
+*backup*.tar*

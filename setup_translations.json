@@ -1,0 +1,18 @@
+{
+  "en": {
+    "provider.spicy_lyrics.manifest.description": "Animated word and syllable lyrics in the current queue.",
+    "provider.spicy_lyrics.config_entries.api_key.label": "Spicy Lyrics API key",
+    "provider.spicy_lyrics.config_entries.api_key.description": "Create a secret key (sl_sk_) at developers.spicylyrics.org. Leave empty when reconfiguring to keep your saved key.",
+    "provider.spicy_lyrics.setup_flow.credentials.title": "Connect Spicy Lyrics",
+    "provider.spicy_lyrics.setup_flow.credentials.description": "The key is stored encrypted on your Music Assistant server.",
+    "provider.spicy_lyrics.errors.invalid_api_key": "Enter a Spicy Lyrics secret key beginning with sl_sk_."
+  },
+  "de": {
+    "provider.spicy_lyrics.manifest.description": "Animierte Wort- und Silben-Lyrics im vorhandenen Liedtextbereich.",
+    "provider.spicy_lyrics.config_entries.api_key.label": "Spicy Lyrics API-Key",
+    "provider.spicy_lyrics.config_entries.api_key.description": "Erstelle einen Secret-Key (sl_sk_) bei developers.spicylyrics.org. Beim Ändern leer lassen, um den gespeicherten Key zu behalten.",
+    "provider.spicy_lyrics.setup_flow.credentials.title": "Spicy Lyrics verbinden",
+    "provider.spicy_lyrics.setup_flow.credentials.description": "Der Key wird verschlüsselt auf deinem Music-Assistant-Server gespeichert.",
+    "provider.spicy_lyrics.errors.invalid_api_key": "Gib einen Spicy-Lyrics-Secret-Key ein, der mit sl_sk_ beginnt."
+  }
+}

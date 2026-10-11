@@ -1,0 +1,5 @@
+Contains modifications to Music Assistant server 2.10.6 and frontend 2.17.297.
+Original projects: https://github.com/music-assistant/server and https://github.com/music-assistant/frontend
+Original license: Apache-2.0. Existing copyright notices remain in the source.
+New provider and rendering code: Apache-2.0.
+No code from the original Spicy Lyrics animation renderer is included.

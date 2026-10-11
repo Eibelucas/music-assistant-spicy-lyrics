@@ -1,0 +1,345 @@
+diff --git a/music_assistant/providers/spicy_lyrics/__init__.py b/music_assistant/providers/spicy_lyrics/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/music_assistant/providers/spicy_lyrics/__init__.py
+@@ -0,0 +1,122 @@
++"""Spicy Lyrics plugin with an authenticated queue-bound lyrics API."""
++
++from __future__ import annotations
++
++import json
++from collections.abc import Callable
++from typing import TYPE_CHECKING, Any
++
++from aiohttp import ClientError, ClientTimeout
++from music_assistant.models.plugin import PluginProvider
++from music_assistant_models.auth import Scope
++from music_assistant_models.enums import MediaType
++from music_assistant_models.errors import (
++    InvalidDataError,
++    LoginFailed,
++    ResourceTemporarilyUnavailable,
++)
++
++from .remote import Reply, SpicyClient, SpicyError, spotify_id
++
++if TYPE_CHECKING:
++    from music_assistant.mass import MusicAssistant
++    from music_assistant.models import ProviderInstanceType
++    from music_assistant_models.config_entries import ProviderConfig
++    from music_assistant_models.provider import ProviderManifest
++
++API_URL = "https://api.spicylyrics.org/v1/lyrics"
++MAX_RESPONSE_BYTES = 2 * 1024 * 1024
++
++
++async def setup(
++    mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
++) -> ProviderInstanceType:
++    """Initialize the plugin."""
++    return SpicyLyricsPlugin(mass, manifest, config, set())
++
++
++class SpicyLyricsPlugin(PluginProvider):
++    """Expose original timing and credits to the existing fullscreen lyrics area."""
++
++    async def handle_async_init(self) -> None:
++        """Prepare the transport using credentials stored by the setup flow."""
++        self._key = str(self.get_setup_value("api_key") or "").strip()
++        if not self._key.startswith("sl_sk_"):
++            raise LoginFailed("Spicy Lyrics requires a secret API key (sl_sk_).")
++        self._client = SpicyClient(self._request)
++        self._unregister: Callable[[], None] | None = None
++
++    async def loaded_in_mass(self) -> None:
++        """Register the read-only lyrics command after loading."""
++        self._unregister = self.mass.register_api_command(
++            "spicy_lyrics/get", self.get_lyrics, required_scope=Scope.QUEUES_READ
++        )
++
++    async def unload(self, is_removed: bool = False) -> None:
++        """Remove the command and release cached lyrics."""
++        if self._unregister:
++            self._unregister()
++            self._unregister = None
++        self._client.cache.clear()
++
++    async def get_lyrics(self, queue_id: str) -> dict[str, Any]:
++        """Return lyrics for the currently playing track in an existing queue."""
++        queue = self.mass.player_queues.get(queue_id)
++        if queue is None:
++            raise InvalidDataError("Unknown queue")
++        item = queue.current_item
++        result: dict[str, Any] = {
++            "status": "no_track",
++            "queue_item_id": item.queue_item_id if item else None,
++            "lyrics": None,
++        }
++        if not queue.active or not item or not item.media_item:
++            return result
++        track = item.media_item
++        if track.media_type != MediaType.TRACK:
++            return result
++        track_id = spotify_id(track)
++        if track_id is None:
++            result["status"] = "unsupported_track"
++            return result
++        try:
++            body = await self._client.get(track_id)
++        except SpicyError as err:
++            if str(err) == "invalid_api_key":
++                raise LoginFailed("Spicy Lyrics did not accept the API key.") from None
++            raise ResourceTemporarilyUnavailable(
++                "Spicy Lyrics is temporarily unavailable. Please try again later."
++            ) from None
++        result["status"] = "ready" if body else "no_lyrics"
++        result["lyrics"] = body
++        return result
++
++    async def _request(self, track_id: str) -> Reply:
++        """Request the fixed endpoint; keep secrets and upstream errors server-side."""
++        try:
++            async with self.mass.http_session.get(
++                f"{API_URL}/{track_id}",
++                headers={"Authorization": f"Bearer {self._key}"},
++                timeout=ClientTimeout(total=15),
++                allow_redirects=False,
++            ) as response:
++                body: dict[str, Any] = {}
++                if response.status == 200:
++                    chunks: list[bytes] = []
++                    size = 0
++                    async for chunk in response.content.iter_chunked(65536):
++                        size += len(chunk)
++                        if size > MAX_RESPONSE_BYTES:
++                            raise SpicyError("invalid_response")
++                        chunks.append(chunk)
++                    decoded = json.loads(b"".join(chunks))
++                    if not isinstance(decoded, dict):
++                        raise SpicyError("invalid_response")
++                    body = decoded
++                return Reply(
++                    response.status,
++                    body,
++                    {"Retry-After": response.headers.get("Retry-After", "60")},
++                )
++        except (ClientError, TimeoutError, ValueError, UnicodeDecodeError):
++            raise SpicyError("service_unavailable") from None
+diff --git a/music_assistant/providers/spicy_lyrics/remote.py b/music_assistant/providers/spicy_lyrics/remote.py
+new file mode 100644
+--- /dev/null
++++ b/music_assistant/providers/spicy_lyrics/remote.py
+@@ -0,0 +1,100 @@
++"""Bounded in-memory caching and rate limiting for the Spicy Lyrics API."""
++
++from __future__ import annotations
++
++import asyncio
++import re
++from collections import OrderedDict
++from collections.abc import Awaitable, Callable
++from dataclasses import dataclass
++from time import monotonic
++from typing import Any
++
++TRACK_ID = re.compile(r"^[A-Za-z0-9]{22}$")
++CACHE_LIMIT = 128
++CACHE_TTL = 300
++MISSING_TTL = 60
++REQUEST_INTERVAL = 1.0
++
++
++@dataclass
++class Reply:
++    """A decoded HTTP response from the fixed API endpoint."""
++
++    status: int
++    body: dict[str, Any]
++    headers: dict[str, str]
++
++
++class SpicyError(Exception):
++    """A safe error category suitable for returning to a client."""
++
++
++class SpicyClient:
++    """Fetch lyrics without duplicate concurrent lookups or unbounded caching."""
++
++    def __init__(self, request: Callable[[str], Awaitable[Reply]]) -> None:
++        """Initialize with an authenticated HTTP transport."""
++        self.request = request
++        self.lock = asyncio.Lock()
++        self.cache: OrderedDict[str, tuple[float, dict[str, Any] | None]] = OrderedDict()
++        self.next_request = 0.0
++        self.cooldown = 0.0
++
++    async def get(self, track_id: str) -> dict[str, Any] | None:
++        """Return lyrics, or None when the service has no lyrics for the track."""
++        if not TRACK_ID.fullmatch(track_id):
++            raise SpicyError("invalid_track")
++        async with self.lock:
++            now = monotonic()
++            if track_id in self.cache:
++                expiration, body = self.cache[track_id]
++                if expiration > now:
++                    self.cache.move_to_end(track_id)
++                    return body
++                del self.cache[track_id]
++            if self.cooldown > now:
++                raise SpicyError("rate_limited")
++            delay = self.next_request - now
++            if delay > 0:
++                await asyncio.sleep(delay)
++            self.next_request = monotonic() + REQUEST_INTERVAL
++            reply = await self.request(track_id)
++            if reply.status == 429:
++                try:
++                    retry = float(reply.headers.get("Retry-After", "60"))
++                except ValueError:
++                    retry = 60.0
++                self.cooldown = monotonic() + max(1.0, min(retry, 86400.0))
++                raise SpicyError("rate_limited")
++            if reply.status in (401, 403):
++                raise SpicyError("invalid_api_key")
++            if reply.status == 404:
++                body = None
++            elif reply.status != 200:
++                raise SpicyError("service_unavailable")
++            else:
++                body = reply.body.get("Body")
++                if not isinstance(body, dict) or body.get("Type") not in (
++                    "Syllable",
++                    "Line",
++                    "Static",
++                ):
++                    raise SpicyError("invalid_response")
++            self.cache[track_id] = (
++                monotonic() + (CACHE_TTL if body else MISSING_TTL),
++                body,
++            )
++            while len(self.cache) > CACHE_LIMIT:
++                self.cache.popitem(last=False)
++            return body
++
++
++def spotify_id(track: Any) -> str | None:
++    """Resolve an existing Spotify mapping without guessing a different recording."""
++    for mapping in getattr(track, "provider_mappings", ()):
++        if mapping.provider_domain == "spotify" and TRACK_ID.fullmatch(mapping.item_id):
++            return str(mapping.item_id)
++    uri = str(getattr(track, "uri", ""))
++    match = re.fullmatch(r"spotify://track/([A-Za-z0-9]{22})", uri)
++    return match[1] if match else None
+diff --git a/music_assistant/providers/spicy_lyrics/setup_flow.py b/music_assistant/providers/spicy_lyrics/setup_flow.py
+new file mode 100644
+--- /dev/null
++++ b/music_assistant/providers/spicy_lyrics/setup_flow.py
+@@ -0,0 +1,41 @@
++"""Collect a Spicy Lyrics secret key using Music Assistant's secure setup flow."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING
++
++from music_assistant_models.config_entries import ConfigEntry
++from music_assistant_models.enums import ConfigEntryType
++
++if TYPE_CHECKING:
++    from music_assistant.models.setup_flow import SetupSession
++
++
++async def run_setup(session: SetupSession) -> None:
++    """Store credentials without returning the existing secret to the browser."""
++    setup_data = dict(session.context.setup_data)
++    errors: dict[str, str] | None = None
++    while True:
++        submitted = await session.form(
++            [
++                ConfigEntry(
++                    key="api_key",
++                    type=ConfigEntryType.SECURE_STRING,
++                    required=not bool(setup_data.get("api_key")),
++                )
++            ],
++            step_id="credentials",
++            errors=errors,
++            last_step=True,
++        )
++        new_key = str(submitted.get("api_key") or "").strip()
++        if new_key:
++            if not new_key.startswith("sl_sk_"):
++                errors = {"base": "invalid_api_key"}
++                continue
++            setup_data["api_key"] = new_key
++        if not setup_data.get("api_key"):
++            errors = {"base": "invalid_api_key"}
++            continue
++        await session.finish(setup_data)
++        return
+diff --git a/music_assistant/providers/spicy_lyrics/manifest.json b/music_assistant/providers/spicy_lyrics/manifest.json
+new file mode 100644
+--- /dev/null
++++ b/music_assistant/providers/spicy_lyrics/manifest.json
+@@ -0,0 +1,13 @@
++{
++  "type": "plugin",
++  "stage": "alpha",
++  "domain": "spicy_lyrics",
++  "name": "Spicy Lyrics",
++  "description": "Animated word and syllable lyrics for the current Music Assistant queue.",
++  "codeowners": [],
++  "requirements": [],
++  "documentation": "https://developers.spicylyrics.org/",
++  "multi_instance": false,
++  "builtin": false,
++  "icon": "mic-vocal"
++}
+diff --git a/music_assistant/providers/spicy_lyrics/strings.json b/music_assistant/providers/spicy_lyrics/strings.json
+new file mode 100644
+--- /dev/null
++++ b/music_assistant/providers/spicy_lyrics/strings.json
+@@ -0,0 +1,10 @@
++{
++  "manifest": { "description": "Animated word and syllable lyrics in the current queue." },
++  "config_entries": {
++    "api_key": { "label": "Spicy Lyrics API key", "description": "Create a secret key (sl_sk_) at developers.spicylyrics.org. Leave empty when reconfiguring to keep your saved key." }
++  },
++  "setup_flow": {
++    "credentials": { "title": "Connect Spicy Lyrics", "description": "The key is stored encrypted on your Music Assistant server." }
++  },
++  "errors": { "invalid_api_key": "Enter a Spicy Lyrics secret key beginning with sl_sk_." }
++}
+diff --git a/music_assistant/translations/en.json b/music_assistant/translations/en.json
+--- a/music_assistant/translations/en.json
++++ b/music_assistant/translations/en.json
+@@ -2774,5 +2774,11 @@
+   "provider.zvuk_music.media.recommendations.editorial.name": "Collections",
+   "provider.zvuk_music.media.recommendations.editorial.subtitle": "Editorial playlists from Zvuk by genre",
+   "provider.zvuk_music.setup_flow.user.description": "Music Assistant needs your personal Zvuk X-Auth-Token to reach your account and library.",
+-  "provider.zvuk_music.setup_flow.user.title": "Connect to Zvuk"
++  "provider.zvuk_music.setup_flow.user.title": "Connect to Zvuk",
++  "provider.spicy_lyrics.manifest.description": "Animated word and syllable lyrics in the current queue.",
++  "provider.spicy_lyrics.config_entries.api_key.label": "Spicy Lyrics API key",
++  "provider.spicy_lyrics.config_entries.api_key.description": "Create a secret key (sl_sk_) at developers.spicylyrics.org. Leave empty when reconfiguring to keep your saved key.",
++  "provider.spicy_lyrics.setup_flow.credentials.title": "Connect Spicy Lyrics",
++  "provider.spicy_lyrics.setup_flow.credentials.description": "The key is stored encrypted on your Music Assistant server.",
++  "provider.spicy_lyrics.errors.invalid_api_key": "Enter a Spicy Lyrics secret key beginning with sl_sk_."
+ }
+diff --git a/music_assistant/translations/de.json b/music_assistant/translations/de.json
+--- a/music_assistant/translations/de.json
++++ b/music_assistant/translations/de.json
+@@ -3474,5 +3474,11 @@
+   "provider.plex.config_entries.stream_quality.options.192": "192 kbit\/s",
+   "provider.plex.config_entries.stream_quality.options.320": "320 kbit\/s",
+   "provider.plex.config_entries.stream_quality.options.96": "96 kbit\/s",
+-  "provider.plex.config_entries.stream_quality.options.original": "Original"
+-}
+\ No newline at end of file
++  "provider.plex.config_entries.stream_quality.options.original": "Original",
++  "provider.spicy_lyrics.manifest.description": "Animierte Wort- und Silben-Lyrics im vorhandenen Liedtextbereich.",
++  "provider.spicy_lyrics.config_entries.api_key.label": "Spicy Lyrics API-Key",
++  "provider.spicy_lyrics.config_entries.api_key.description": "Erstelle einen Secret-Key (sl_sk_) bei developers.spicylyrics.org. Beim Ändern leer lassen, um den gespeicherten Key zu behalten.",
++  "provider.spicy_lyrics.setup_flow.credentials.title": "Spicy Lyrics verbinden",
++  "provider.spicy_lyrics.setup_flow.credentials.description": "Der Key wird verschlüsselt auf deinem Music-Assistant-Server gespeichert.",
++  "provider.spicy_lyrics.errors.invalid_api_key": "Gib einen Spicy-Lyrics-Secret-Key ein, der mit sl_sk_ beginnt."
++}

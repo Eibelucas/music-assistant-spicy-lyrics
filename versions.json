@@ -1,0 +1,16 @@
+{
+  "music_assistant": "2.10.6",
+  "server_commit": "c24866405bd2068c25a60e1014e5ef8c3f6445bb",
+  "frontend": "2.17.297",
+  "frontend_commit": "e779b9d359e47cd210c2801f16a0ce6263571903",
+  "stage": "installed in existing addon using local derived image",
+  "frontend_tests_passed": 19,
+  "transport_tests_passed": 8,
+  "frontend_build_passed": true,
+  "live_addon_tested": true,
+  "supervisor_restart_verified": true,
+  "live_lyrics_ui_tested": false,
+  "live_spicy_api_tested": false,
+  "api_key_included": false,
+  "distribution": "source with reproducible image build"
+}

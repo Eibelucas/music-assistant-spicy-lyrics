@@ -1,0 +1,13 @@
+{
+  "type": "plugin",
+  "stage": "alpha",
+  "domain": "spicy_lyrics",
+  "name": "Spicy Lyrics",
+  "description": "Animated word and syllable lyrics for the current Music Assistant queue.",
+  "codeowners": [],
+  "requirements": [],
+  "documentation": "https://developers.spicylyrics.org/",
+  "multi_instance": false,
+  "builtin": false,
+  "icon": "mic-vocal"
+}

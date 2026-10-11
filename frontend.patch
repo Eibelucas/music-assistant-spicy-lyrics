@@ -1,0 +1,884 @@
+diff --git a/src/layouts/default/PlayerOSD/PlayerFullscreen.vue b/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
+--- a/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
++++ b/src/layouts/default/PlayerOSD/PlayerFullscreen.vue
+@@ -202,7 +202,13 @@
+         >
+           <!-- Lyrics view -->
+           <div v-if="showLyrics" class="lyrics-wrapper">
++            <SpicyLyricsPanel
++              v-if="spicyAvailable"
++              :enabled="lyricsVisible"
++              :text-color="sliderColor"
++            />
+             <LyricsViewer
++              v-else
+               :media-item="store.curQueueItem?.media_item"
+               :position="lyricsElapsedTime"
+               :stream-details="store.curQueueItem?.streamdetails"
+@@ -488,6 +494,7 @@
+ 
+ <script setup lang="ts">
+ import LyricsViewer from "@/components/LyricsViewer.vue";
++import SpicyLyricsPanel from "@/components/SpicyLyricsPanel.vue";
+ import MarqueeText from "@/components/MarqueeText.vue";
+ import PanelDragHandle from "@/components/PanelDragHandle.vue";
+ import PlayerIcon from "@/components/PlayerIcon.vue";
+@@ -699,6 +706,11 @@
+ 
+ // Drives the lyrics header button: whether lyrics can be shown, are loading,
+ // or are unavailable (and why).
++const spicyAvailable = computed(() =>
++  Object.values(api.providers).some(
++    (provider) => provider.domain === "spicy_lyrics" && provider.available,
++  ),
++);
+ const lyricsState = computed<
+   "available" | "loading" | "unavailable-song" | "none"
+ >(() => {
+@@ -706,6 +718,7 @@
+   // Lyrics only make sense for tracks; hide the button entirely otherwise.
+   if (store.curQueueItem.media_item?.media_type !== MediaType.TRACK)
+     return "none";
++  if (spicyAvailable.value) return "available";
+   if (lyricsLoading.value) return "loading";
+   if (hasLyrics.value) return "available";
+   return "unavailable-song";
+@@ -725,7 +738,12 @@
+ const lyricsVisible = computed(
+   () => store.showFullscreenPlayer && showLyrics.value,
+ );
+-const { elapsedTime: lyricsElapsedTime } = useLyricsElapsedTime(lyricsVisible);
++const standardLyricsVisible = computed(
++  () => lyricsVisible.value && !spicyAvailable.value,
++);
++const { elapsedTime: lyricsElapsedTime } = useLyricsElapsedTime(
++  standardLyricsVisible,
++);
+ 
+ // If the panel was opened optimistically while lyrics were still loading but
+ // the track turns out to have none, close it again so we don't show an empty
+@@ -830,7 +848,7 @@
+   lyricsLoading.value = isTrack === true && store.showFullscreenPlayer;
+ 
+   // Only fetch lyrics when fullscreen player is open and the item is a track.
+-  if (!store.showFullscreenPlayer || !isTrack) {
++  if (!store.showFullscreenPlayer || !isTrack || spicyAvailable.value) {
+     lyricsLoading.value = false;
+     return;
+   }
+@@ -874,6 +892,7 @@
+ watch(() => store.curQueueItem?.media_item?.item_id, fetchLyrics, {
+   immediate: true,
+ });
++watch(spicyAvailable, fetchLyrics);
+ 
+ // Also fetch lyrics when fullscreen player is opened
+ watch(
+diff --git a/src/translations/en.json b/src/translations/en.json
+--- a/src/translations/en.json
++++ b/src/translations/en.json
+@@ -2407,5 +2407,16 @@
+     "command_center_navigate": "navigate",
+     "command_center_open": "open",
+     "command_center_keep_typing": "Keep typing to search...",
+-    "screens": "Screens"
++    "screens": "Screens",
++    "spicy_lyrics_title": "Spicy Lyrics",
++    "spicy_lyrics_source": "Lyrics from",
++    "spicy_lyrics_uploader": "uploaded by",
++    "spicy_lyrics_maker": "made by",
++    "spicy_lyrics_retry": "Try again",
++    "spicy_lyrics_no_track": "Play a song from the selected queue to see its lyrics.",
++    "spicy_lyrics_not_configured": "Set up the Spicy Lyrics plugin in Settings → Plugins.",
++    "spicy_lyrics_no_lyrics": "Spicy Lyrics has no lyrics for this recording.",
++    "spicy_lyrics_unsupported_track": "This song has no Spotify mapping. Spicy Lyrics needs a Spotify track ID.",
++    "spicy_lyrics_track_changed": "The song changed during loading. Try again.",
++    "spicy_lyrics_error": "Could not load Spicy Lyrics. Check your API key and connection, or try again later."
+ }
+diff --git a/src/translations/de.json b/src/translations/de.json
+--- a/src/translations/de.json
++++ b/src/translations/de.json
+@@ -2383,5 +2383,16 @@
+     "command_center_open": "öffnen",
+     "command_center_keep_typing": "Tippe weiter, um zu suchen...",
+     "screens": "Bildschirme",
+-    "play_from_here_to_latest": "Von hier bis zum neuesten Abschnitt abspielen"
+-}
+\ No newline at end of file
++    "play_from_here_to_latest": "Von hier bis zum neuesten Abschnitt abspielen",
++    "spicy_lyrics_title": "Spicy Lyrics",
++    "spicy_lyrics_source": "Lyrics von",
++    "spicy_lyrics_uploader": "hochgeladen von",
++    "spicy_lyrics_maker": "erstellt von",
++    "spicy_lyrics_retry": "Erneut versuchen",
++    "spicy_lyrics_no_track": "Starte einen Song aus der ausgewählten Warteschlange.",
++    "spicy_lyrics_not_configured": "Richte Spicy Lyrics unter Einstellungen → Plugins ein.",
++    "spicy_lyrics_no_lyrics": "Für diese Aufnahme sind bei Spicy Lyrics keine Lyrics verfügbar.",
++    "spicy_lyrics_unsupported_track": "Diesem Song fehlt die Spotify-Zuordnung. Spicy Lyrics benötigt eine Spotify-Song-ID.",
++    "spicy_lyrics_track_changed": "Der Song wurde während des Ladens gewechselt. Versuche es erneut.",
++    "spicy_lyrics_error": "Spicy Lyrics konnte nicht geladen werden. Prüfe API-Key und Verbindung oder versuche es später erneut."
++}
+diff --git a/src/components/SpicyLyricsPanel.vue b/src/components/SpicyLyricsPanel.vue
+new file mode 100644
+--- /dev/null
++++ b/src/components/SpicyLyricsPanel.vue
+@@ -0,0 +1,239 @@
++<template>
++  <section
++    class="spicy-panel"
++    :style="{
++      color: textColor,
++      '--spicy-sung-color': textColor,
++      '--spicy-unsung-color': unsungColor,
++    }"
++    :aria-label="$t('spicy_lyrics_title')"
++  >
++    <div
++      v-if="loading"
++      role="status"
++      class="flex flex-1 items-center justify-center gap-3"
++    >
++      <Spinner class="size-6" />{{ $t("lyrics_loading") }}
++    </div>
++    <div
++      v-else-if="!lyrics"
++      class="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center"
++      role="status"
++    >
++      <p>{{ $t(`spicy_lyrics_${state}`) }}</p>
++      <Button
++        v-if="state === 'error' || state === 'track_changed'"
++        variant="outline"
++        @click="retry"
++      >
++        {{ $t("spicy_lyrics_retry") }}
++      </Button>
++    </div>
++    <template v-else>
++      <div
++        ref="scrollRef"
++        class="spicy-scroll"
++        tabindex="0"
++        :aria-label="$t('lyrics')"
++      >
++        <p
++          v-if="lyrics.type !== 'Static' && activeIndex < 0"
++          class="spicy-intro"
++        >
++          {{ $t("lyrics_will_appear_soon") }}
++        </p>
++        <div
++          v-for="(line, index) in lyrics.lines"
++          :key="index"
++          :ref="(element) => setLineRef(element, index)"
++          class="spicy-line"
++          :class="{
++            active: isActive(line),
++            opposite: line.opposite,
++            static: lyrics.type === 'Static',
++          }"
++        >
++          <SpicyVocal :vocal="line.lead" :position="position" />
++          <div
++            v-for="(group, groupIndex) in line.background"
++            :key="groupIndex"
++            class="spicy-background"
++          >
++            <SpicyVocal :vocal="group" :position="position" />
++          </div>
++          <p v-if="line.lead.translation" class="spicy-translation">
++            {{ line.lead.translation }}
++          </p>
++        </div>
++      </div>
++      <footer class="spicy-credit">
++        {{ $t("spicy_lyrics_source") }} {{ spicySourceName(lyrics.source) }}
++        <template v-if="lyrics.uploader">
++          · {{ $t("spicy_lyrics_uploader") }}
++          <a
++            v-if="lyrics.uploader.url"
++            :href="lyrics.uploader.url"
++            target="_blank"
++            rel="noopener noreferrer"
++            >{{ lyrics.uploader.name }}</a
++          >
++          <span v-else>{{ lyrics.uploader.name }}</span>
++        </template>
++        <template v-if="lyrics.maker">
++          · {{ $t("spicy_lyrics_maker") }}
++          <a
++            v-if="lyrics.maker.url"
++            :href="lyrics.maker.url"
++            target="_blank"
++            rel="noopener noreferrer"
++            >{{ lyrics.maker.name }}</a
++          >
++          <span v-else>{{ lyrics.maker.name }}</span>
++        </template>
++      </footer>
++    </template>
++  </section>
++</template>
++
++<script setup lang="ts">
++import {
++  computed,
++  nextTick,
++  ref,
++  toRef,
++  watch,
++  type ComponentPublicInstance,
++} from "vue";
++import SpicyVocal from "@/components/SpicyVocal.vue";
++import { Button } from "@/components/ui/button";
++import { Spinner } from "@/components/ui/spinner";
++import { useSpicyLyrics } from "@/composables/lyrics/useSpicyLyrics";
++import { useLyricsElapsedTime } from "@/composables/lyrics/useLyricsElapsedTime";
++import { useLyricsOffset } from "@/composables/lyrics/useLyricsOffset";
++import {
++  activeSpicyLine,
++  spicySourceName,
++  type SpicyLine,
++} from "@/helpers/spicyLyrics";
++import { $t } from "@/plugins/i18n";
++import Color from "color";
++
++const props = withDefaults(
++  defineProps<{ enabled: boolean; textColor?: string }>(),
++  { textColor: "#FFFFFF" },
++);
++const enabled = toRef(props, "enabled");
++const unsungColor = computed(() => {
++  try {
++    return Color(props.textColor).alpha(0.35).string();
++  } catch {
++    return "#ffffff55";
++  }
++});
++const { lyrics, loading, state, retry } = useSpicyLyrics(enabled);
++const { elapsedTime } = useLyricsElapsedTime(enabled);
++const { offset } = useLyricsOffset();
++const position = computed(() => elapsedTime.value + offset.value);
++const activeIndex = computed(() =>
++  activeSpicyLine(lyrics.value?.lines || [], position.value),
++);
++const scrollRef = ref<HTMLElement | null>(null);
++const lineRefs: (HTMLElement | null)[] = [];
++function setLineRef(
++  element: Element | ComponentPublicInstance | null,
++  index: number,
++) {
++  lineRefs[index] = element instanceof HTMLElement ? element : null;
++}
++function isActive(line: SpicyLine) {
++  return [line.lead, ...line.background].some(
++    (group) => position.value >= group.start && position.value < group.end,
++  );
++}
++watch(lyrics, () => {
++  lineRefs.length = 0;
++});
++watch(activeIndex, async (index) => {
++  if (lyrics.value?.type === "Static") return;
++  await nextTick();
++  const container = scrollRef.value;
++  const element = lineRefs[index];
++  if (!container || !element) return;
++  const top =
++    element.offsetTop - container.offsetTop - container.clientHeight * 0.35;
++  container.scrollTo({
++    top: Math.max(0, top),
++    behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
++      ? "instant"
++      : "smooth",
++  });
++});
++</script>
++
++<style scoped>
++.spicy-panel {
++  height: 100%;
++  min-height: 0;
++  display: flex;
++  flex-direction: column;
++}
++.spicy-scroll {
++  flex: 1;
++  min-height: 0;
++  position: relative;
++  overflow-y: auto;
++  padding: 35% 1rem 45%;
++  scrollbar-width: thin;
++}
++.spicy-line {
++  font-weight: 700;
++  font-size: clamp(1.4rem, 2vw, 2.2rem);
++  text-align: center;
++  line-height: 1.4;
++  margin-bottom: 1.3rem;
++  opacity: 0.4;
++  transform-origin: left center;
++  transition:
++    opacity 350ms,
++    transform 350ms;
++}
++.spicy-line.active,
++.spicy-line.static {
++  opacity: 1;
++}
++.spicy-line.active {
++  transform: scale(1.035);
++}
++.spicy-line.opposite {
++  text-align: right;
++  transform-origin: right center;
++}
++.spicy-background {
++  font-size: 0.65em;
++  margin-top: 0.2em;
++}
++.spicy-translation {
++  font-size: 0.55em;
++  font-weight: 400;
++  opacity: 0.8;
++}
++.spicy-credit {
++  flex-shrink: 0;
++  font-size: 0.72rem;
++  padding: 0.75rem 1rem;
++  opacity: 0.8;
++}
++.spicy-credit a {
++  text-decoration: underline;
++}
++.spicy-intro {
++  opacity: 0.7;
++  margin-bottom: 1rem;
++}
++@media (prefers-reduced-motion: reduce) {
++  .spicy-line {
++    transition: none;
++    transform: none !important;
++  }
++}
++</style>
+diff --git a/src/components/SpicyVocal.vue b/src/components/SpicyVocal.vue
+new file mode 100644
+--- /dev/null
++++ b/src/components/SpicyVocal.vue
+@@ -0,0 +1,54 @@
++<template>
++  <span v-if="vocal.syllables.length" class="spicy-vocal">
++    <template v-for="(syllable, index) in vocal.syllables" :key="index">
++      <span
++        class="spicy-syllable"
++        :class="{
++          singing: position >= syllable.start && position < syllable.end,
++        }"
++        :style="{
++          '--fill': `${syllableProgress(position, syllable.start, syllable.end)}%`,
++        }"
++        >{{ syllable.text }}</span
++      >{{
++        syllable.spaceAfter && index < vocal.syllables.length - 1 ? " " : ""
++      }}
++    </template>
++  </span>
++  <span v-else>{{ vocal.text }}</span>
++</template>
++
++<script setup lang="ts">
++import { syllableProgress, type SpicyVocal } from "@/helpers/spicyLyrics";
++defineProps<{ vocal: SpicyVocal; position: number }>();
++</script>
++
++<style scoped>
++.spicy-syllable {
++  display: inline-block;
++  color: transparent;
++  background: linear-gradient(
++    90deg,
++    var(--spicy-sung-color, #fff) var(--fill),
++    var(--spicy-unsung-color, #ffffff55) var(--fill)
++  );
++  background-clip: text;
++  -webkit-background-clip: text;
++  transition:
++    transform 180ms ease,
++    filter 180ms ease;
++}
++.singing {
++  transform: translateY(-0.08em);
++  filter: drop-shadow(0 0 0.2em #ffffff55);
++}
++@media (prefers-reduced-motion: reduce) {
++  .spicy-syllable {
++    transition: none;
++  }
++  .singing {
++    transform: none;
++    filter: none;
++  }
++}
++</style>
+diff --git a/src/helpers/spicyLyrics.ts b/src/helpers/spicyLyrics.ts
+new file mode 100644
+--- /dev/null
++++ b/src/helpers/spicyLyrics.ts
+@@ -0,0 +1,183 @@
++export interface SpicySyllable {
++  text: string;
++  start: number;
++  end: number;
++  spaceAfter: boolean;
++}
++
++export interface SpicyVocal {
++  text: string;
++  start: number;
++  end: number;
++  syllables: SpicySyllable[];
++  translation?: string;
++}
++
++export interface SpicyLine {
++  lead: SpicyVocal;
++  background: SpicyVocal[];
++  opposite: boolean;
++}
++
++export interface SpicyCredit {
++  name: string;
++  url?: string;
++}
++
++export interface SpicyLyrics {
++  type: "Syllable" | "Line" | "Static";
++  lines: SpicyLine[];
++  source: string;
++  uploader?: SpicyCredit;
++  maker?: SpicyCredit;
++}
++
++function object(value: unknown): Record<string, unknown> {
++  return typeof value === "object" && value !== null && !Array.isArray(value)
++    ? (value as Record<string, unknown>)
++    : {};
++}
++
++function list(value: unknown): unknown[] {
++  return Array.isArray(value) ? value : [];
++}
++
++function time(value: unknown): number | undefined {
++  return typeof value === "number" && Number.isFinite(value) && value >= 0
++    ? value
++    : undefined;
++}
++
++function text(value: unknown): string {
++  return typeof value === "string" ? value : "";
++}
++
++function vocal(value: unknown): SpicyVocal | undefined {
++  const raw = object(value);
++  const syllables = list(raw.Syllables).flatMap((entry): SpicySyllable[] => {
++    const item = object(entry);
++    const start = time(item.StartTime);
++    const end = time(item.EndTime);
++    if (
++      start === undefined ||
++      end === undefined ||
++      end < start ||
++      !text(item.Text)
++    )
++      return [];
++    return [
++      {
++        text: text(item.Text),
++        start,
++        end,
++        spaceAfter: item.IsPartOfWord !== true,
++      },
++    ];
++  });
++  const start = time(raw.StartTime) ?? syllables[0]?.start;
++  const end = time(raw.EndTime) ?? syllables.at(-1)?.end;
++  const content =
++    text(raw.Text) ||
++    syllables
++      .map(
++        (item, index) =>
++          item.text +
++          (item.spaceAfter && index < syllables.length - 1 ? " " : ""),
++      )
++      .join("");
++  if (start === undefined || end === undefined || end < start || !content)
++    return;
++  return {
++    text: content,
++    start,
++    end,
++    syllables,
++    translation: text(raw.TranslatedText) || undefined,
++  };
++}
++
++function credit(value: unknown): SpicyCredit | undefined {
++  const raw = object(value);
++  const name = text(raw.username);
++  if (!name) return;
++  const url = text(raw.url);
++  return {
++    name,
++    url: /^https:\/\/spicylyrics\.org\/uid\/[A-Za-z0-9_-]+$/.test(url)
++      ? url
++      : undefined,
++  };
++}
++
++export function parseSpicyLyrics(value: unknown): SpicyLyrics {
++  const raw = object(value);
++  const type = raw.Type;
++  if (type !== "Syllable" && type !== "Line" && type !== "Static")
++    throw new Error("Unsupported Spicy Lyrics response");
++  const lines = list(type === "Static" ? raw.Lines : raw.Content)
++    .flatMap((entry): SpicyLine[] => {
++      const item = object(entry);
++      if (type === "Static") {
++        const content = text(item.Text);
++        return content
++          ? [
++              {
++                lead: { text: content, start: 0, end: 0, syllables: [] },
++                background: [],
++                opposite: false,
++              },
++            ]
++          : [];
++      }
++      if (item.Type !== "Vocal") return [];
++      const lead = vocal(type === "Syllable" ? item.Lead : item);
++      if (!lead) return [];
++      const background = list(item.Background).flatMap((group) => {
++        const parsed = vocal(group);
++        return parsed ? [parsed] : [];
++      });
++      return [{ lead, background, opposite: item.OppositeAligned === true }];
++    })
++    .sort((a, b) => a.lead.start - b.lead.start);
++  if (!lines.length) throw new Error("Empty Spicy Lyrics response");
++  const attribution = object(raw.UploadAttribution);
++  return {
++    type,
++    lines,
++    source: text(raw.source) || "unknown",
++    uploader: credit(attribution.Uploader),
++    maker: credit(attribution.Maker),
++  };
++}
++
++export function syllableProgress(
++  position: number,
++  start: number,
++  end: number,
++): number {
++  if (position < start) return 0;
++  if (end <= start || position >= end) return 100;
++  return ((position - start) / (end - start)) * 100;
++}
++
++export function activeSpicyLine(lines: SpicyLine[], position: number): number {
++  const active = lines.findIndex((line) =>
++    [line.lead, ...line.background].some(
++      (group) => position >= group.start && position < group.end,
++    ),
++  );
++  if (active >= 0) return active;
++  return lines.findLastIndex((line) => position >= line.lead.start);
++}
++
++export function spicySourceName(source: string): string {
++  return (
++    (
++      {
++        spicy_lyrics: "Spicy Lyrics",
++        apple_music: "Apple Music",
++        spotify: "Spotify",
++      } as Record<string, string>
++    )[source] || "Spicy Lyrics API"
++  );
++}
+diff --git a/src/helpers/spicyLyrics.test.ts b/src/helpers/spicyLyrics.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/helpers/spicyLyrics.test.ts
+@@ -0,0 +1,87 @@
++import { describe, expect, it } from "vitest";
++import {
++  activeSpicyLine,
++  parseSpicyLyrics,
++  syllableProgress,
++} from "./spicyLyrics";
++
++const vocal = (start = 1, end = 3) => ({
++  StartTime: start,
++  EndTime: end,
++  Syllables: [
++    { Text: "Hel", StartTime: start, EndTime: start + 0.5, IsPartOfWord: true },
++    { Text: "lo", StartTime: start + 0.5, EndTime: start + 1 },
++    { Text: "world", StartTime: start + 1, EndTime: end },
++  ],
++});
++describe("Spicy Lyrics", () => {
++  it("joins syllables and retains background and duet timing", () => {
++    const parsed = parseSpicyLyrics({
++      Type: "Syllable",
++      source: "spicy_lyrics",
++      Content: [
++        {
++          Type: "Vocal",
++          Lead: vocal(),
++          Background: [vocal(2, 4)],
++          OppositeAligned: true,
++        },
++      ],
++    });
++    expect(parsed.lines[0].lead.text).toBe("Hello world");
++    expect(parsed.lines[0].opposite).toBe(true);
++    expect(parsed.lines[0].background[0].end).toBe(4);
++    expect(activeSpicyLine(parsed.lines, 3.5)).toBe(0);
++  });
++  it("parses line and static sync modes without fabricating word timing", () => {
++    const line = parseSpicyLyrics({
++      Type: "Line",
++      Content: [{ Type: "Vocal", Text: "Example", StartTime: 1, EndTime: 2 }],
++    });
++    expect(line.lines[0].lead.syllables).toEqual([]);
++    expect(
++      parseSpicyLyrics({ Type: "Static", Lines: [{ Text: "Example" }] })
++        .lines[0].lead.text,
++    ).toBe("Example");
++  });
++  it("skips interludes and malformed timing and rejects empty responses", () => {
++    expect(() =>
++      parseSpicyLyrics({
++        Type: "Line",
++        Content: [
++          { Type: "Interlude", StartTime: 0, EndTime: 1 },
++          { Type: "Vocal", Text: "Bad", StartTime: 3, EndTime: 2 },
++        ],
++      }),
++    ).toThrow("Empty");
++    expect(() => parseSpicyLyrics(null)).toThrow("Unsupported");
++  });
++  it("preserves credits but does not turn unsafe URLs into links", () => {
++    const data = parseSpicyLyrics({
++      Type: "Static",
++      Lines: [{ Text: "Example" }],
++      UploadAttribution: {
++        Uploader: { username: "Alice", url: "javascript:alert(1)" },
++        Maker: { username: "Bob", url: "https://spicylyrics.org/uid/123" },
++      },
++    });
++    expect(data.uploader).toEqual({ name: "Alice", url: undefined });
++    expect(data.maker?.url).toBe("https://spicylyrics.org/uid/123");
++  });
++  it("handles seeks and zero-duration syllables", () => {
++    expect(syllableProgress(0, 1, 2)).toBe(0);
++    expect(syllableProgress(1.5, 1, 2)).toBe(50);
++    expect(syllableProgress(4, 1, 2)).toBe(100);
++    expect(syllableProgress(1, 1, 1)).toBe(100);
++    const { lines } = parseSpicyLyrics({
++      Type: "Line",
++      Content: [
++        { Type: "Vocal", Text: "A", StartTime: 1, EndTime: 2 },
++        { Type: "Vocal", Text: "B", StartTime: 4, EndTime: 5 },
++      ],
++    });
++    expect(activeSpicyLine(lines, 4.5)).toBe(1);
++    expect(activeSpicyLine(lines, 1.5)).toBe(0);
++    expect(activeSpicyLine(lines, 0)).toBe(-1);
++  });
++});
+diff --git a/src/composables/lyrics/useSpicyLyrics.ts b/src/composables/lyrics/useSpicyLyrics.ts
+new file mode 100644
+--- /dev/null
++++ b/src/composables/lyrics/useSpicyLyrics.ts
+@@ -0,0 +1,89 @@
++import {
++  computed,
++  onScopeDispose,
++  ref,
++  shallowRef,
++  watch,
++  type Ref,
++} from "vue";
++import { parseSpicyLyrics, type SpicyLyrics } from "@/helpers/spicyLyrics";
++import api from "@/plugins/api";
++import { store } from "@/plugins/store";
++import { MediaType } from "@/plugins/api/interfaces";
++
++interface SpicyResult {
++  status: "ready" | "no_lyrics" | "unsupported_track" | "no_track";
++  queue_item_id: string | null;
++  lyrics: unknown;
++}
++
++export function useSpicyLyrics(enabled: Ref<boolean>) {
++  const available = computed(() =>
++    Object.values(api.providers).some(
++      (provider) => provider.domain === "spicy_lyrics" && provider.available,
++    ),
++  );
++  const lyrics = shallowRef<SpicyLyrics | null>(null);
++  const loading = ref(false);
++  const state = ref("no_track");
++  let generation = 0;
++
++  const load = async () => {
++    const current = ++generation;
++    lyrics.value = null;
++    loading.value = false;
++    const queue = store.activePlayerQueue;
++    const item = store.curQueueItem;
++    if (
++      !enabled.value ||
++      !available.value ||
++      !queue?.active ||
++      !item ||
++      item.media_item?.media_type !== MediaType.TRACK
++    ) {
++      state.value = available.value ? "no_track" : "not_configured";
++      return;
++    }
++    const itemId = item.queue_item_id;
++    loading.value = true;
++    try {
++      const result = await api.sendCommand<SpicyResult>(
++        "spicy_lyrics/get",
++        { queue_id: queue.queue_id },
++        { suppressGlobalError: true },
++      );
++      if (
++        current !== generation ||
++        store.curQueueItem?.queue_item_id !== itemId
++      )
++        return;
++      if (result.queue_item_id !== itemId) {
++        state.value = "track_changed";
++        return;
++      }
++      state.value = result.status;
++      if (result.status === "ready")
++        lyrics.value = parseSpicyLyrics(result.lyrics);
++    } catch {
++      if (current === generation) state.value = "error";
++    } finally {
++      if (current === generation) loading.value = false;
++    }
++  };
++
++  watch(
++    () => [
++      enabled.value,
++      available.value,
++      store.activePlayerQueue?.queue_id,
++      store.activePlayerQueue?.active,
++      store.curQueueItem?.queue_item_id,
++    ],
++    load,
++    { immediate: true },
++  );
++  onScopeDispose(() => {
++    generation++;
++  });
++  return { available, lyrics, loading, state, retry: load };
++}
+diff --git a/src/composables/lyrics/useSpicyLyrics.test.ts b/src/composables/lyrics/useSpicyLyrics.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/composables/lyrics/useSpicyLyrics.test.ts
+@@ -0,0 +1,82 @@
++import { describe, expect, it, vi, beforeEach } from "vitest";
++import { effectScope, nextTick, reactive, ref } from "vue";
++
++vi.mock("@/plugins/api", () => ({
++  default: {
++    providers: { spicy: { domain: "spicy_lyrics", available: true } },
++    sendCommand: vi.fn(),
++  },
++}));
++vi.mock("@/plugins/store", () => ({
++  store: reactive({
++    activePlayerQueue: { queue_id: "queue", active: true },
++    curQueueItem: { queue_item_id: "a", media_item: { media_type: "track" } },
++  }),
++}));
++import api from "@/plugins/api";
++import { store } from "@/plugins/store";
++import { useSpicyLyrics } from "./useSpicyLyrics";
++
++const result = (id: string, text: string) => ({
++  status: "ready",
++  queue_item_id: id,
++  lyrics: { Type: "Static", Lines: [{ Text: text }] },
++});
++async function settle() {
++  await nextTick();
++  await Promise.resolve();
++  await nextTick();
++}
++
++describe("queue-bound Spicy Lyrics loading", () => {
++  beforeEach(() => {
++    vi.mocked(api.sendCommand).mockReset();
++    store.curQueueItem!.queue_item_id = "a";
++    store.activePlayerQueue!.active = true;
++  });
++  it("does not fetch while the lyrics panel is hidden", () => {
++    const scope = effectScope();
++    scope.run(() => useSpicyLyrics(ref(false)));
++    expect(api.sendCommand).not.toHaveBeenCalled();
++    scope.stop();
++  });
++  it("discards a late result after the song changed", async () => {
++    let resolveFirst!: (value: unknown) => void;
++    vi.mocked(api.sendCommand).mockImplementationOnce(
++      () =>
++        new Promise((resolve) => {
++          resolveFirst = resolve;
++        }),
++    );
++    vi.mocked(api.sendCommand).mockResolvedValueOnce(result("b", "Second"));
++    const scope = effectScope();
++    const state = scope.run(() => useSpicyLyrics(ref(true)))!;
++    store.curQueueItem!.queue_item_id = "b";
++    await settle();
++    expect(state.lyrics.value?.lines[0].lead.text).toBe("Second");
++    resolveFirst(result("a", "First"));
++    await settle();
++    expect(state.lyrics.value?.lines[0].lead.text).toBe("Second");
++    scope.stop();
++  });
++  it("does not show an API result belonging to another queue item", async () => {
++    vi.mocked(api.sendCommand).mockResolvedValue(
++      result("different", "Wrong song"),
++    );
++    const scope = effectScope();
++    const state = scope.run(() => useSpicyLyrics(ref(true)))!;
++    await settle();
++    expect(state.lyrics.value).toBeNull();
++    expect(state.state.value).toBe("track_changed");
++    scope.stop();
++  });
++  it("shows a recoverable error when the API fails", async () => {
++    vi.mocked(api.sendCommand).mockRejectedValue(new Error("network"));
++    const scope = effectScope();
++    const state = scope.run(() => useSpicyLyrics(ref(true)))!;
++    await settle();
++    expect(state.state.value).toBe("error");
++    expect(state.loading.value).toBe(false);
++    scope.stop();
++  });
++});

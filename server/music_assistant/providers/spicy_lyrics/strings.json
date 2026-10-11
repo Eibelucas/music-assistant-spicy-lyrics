@@ -1,0 +1,10 @@
+{
+  "manifest": { "description": "Animated word and syllable lyrics in the current queue." },
+  "config_entries": {
+    "api_key": { "label": "Spicy Lyrics API key", "description": "Create a secret key (sl_sk_) at developers.spicylyrics.org. Leave empty when reconfiguring to keep your saved key." }
+  },
+  "setup_flow": {
+    "credentials": { "title": "Connect Spicy Lyrics", "description": "The key is stored encrypted on your Music Assistant server." }
+  },
+  "errors": { "invalid_api_key": "Enter a Spicy Lyrics secret key beginning with sl_sk_." }
+}
